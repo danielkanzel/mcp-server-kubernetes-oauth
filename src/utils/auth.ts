@@ -13,6 +13,28 @@ function timingSafeCompare(a: string, b: string): boolean {
   return timingSafeEqual(bufA, bufB);
 }
 
+export type StaticAuthMatch = "disabled" | "ok" | "missing" | "malformed" | "mismatch";
+
+/**
+ * Compare an X-MCP-AUTH header value with MCP_AUTH_TOKEN.
+ * "disabled" means the static token is not configured.
+ */
+export function matchStaticAuthToken(
+  provided: string | string[] | undefined
+): StaticAuthMatch {
+  const authToken = process.env.MCP_AUTH_TOKEN;
+  if (!authToken) {
+    return "disabled";
+  }
+  if (provided === undefined) {
+    return "missing";
+  }
+  if (Array.isArray(provided)) {
+    return "malformed";
+  }
+  return timingSafeCompare(provided, authToken) ? "ok" : "mismatch";
+}
+
 /**
  * Authentication middleware for MCP HTTP transports.
  *
@@ -27,55 +49,43 @@ function timingSafeCompare(a: string, b: string): boolean {
  *   Client: X-MCP-AUTH: my-secret-token
  */
 export function createAuthMiddleware() {
-  const authToken = process.env.MCP_AUTH_TOKEN;
-
   return (req: Request, res: Response, next: NextFunction): void => {
-    // If no auth token is configured, allow all requests
-    if (!authToken) {
-      next();
-      return;
+    switch (matchStaticAuthToken(req.headers["x-mcp-auth"])) {
+      case "disabled":
+      case "ok":
+        next();
+        return;
+      case "missing":
+        res.status(401).json({
+          jsonrpc: "2.0",
+          error: {
+            code: -32001,
+            message: "Unauthorized: X-MCP-AUTH header is required",
+          },
+          id: null,
+        });
+        return;
+      case "malformed":
+        res.status(401).json({
+          jsonrpc: "2.0",
+          error: {
+            code: -32001,
+            message: "Unauthorized: Only single X-MCP-AUTH header is allowed",
+          },
+          id: null,
+        });
+        return;
+      case "mismatch":
+        res.status(403).json({
+          jsonrpc: "2.0",
+          error: {
+            code: -32002,
+            message: "Forbidden: Invalid authentication token",
+          },
+          id: null,
+        });
+        return;
     }
-
-    const providedToken = req.headers["x-mcp-auth"];
-
-    if (!providedToken) {
-      res.status(401).json({
-        jsonrpc: "2.0",
-        error: {
-          code: -32001,
-          message: "Unauthorized: X-MCP-AUTH header is required",
-        },
-        id: null,
-      });
-      return;
-    }
-
-    // Reject array-valued headers (e.g. duplicate X-MCP-AUTH)
-    if (Array.isArray(providedToken)) {
-      res.status(401).json({
-        jsonrpc: "2.0",
-        error: {
-          code: -32001,
-          message: "Unauthorized: Only single X-MCP-AUTH header is allowed",
-        },
-        id: null,
-      });
-      return;
-    }
-
-    if (!timingSafeCompare(providedToken, authToken)) {
-      res.status(403).json({
-        jsonrpc: "2.0",
-        error: {
-          code: -32002,
-          message: "Forbidden: Invalid authentication token",
-        },
-        id: null,
-      });
-      return;
-    }
-
-    next();
   };
 }
 

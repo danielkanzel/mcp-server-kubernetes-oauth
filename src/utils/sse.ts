@@ -1,7 +1,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import express from "express";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
-import { createAuthMiddleware, isAuthEnabled } from "./auth.js";
+import { configureHttpAuth } from "./authentik-oauth.js";
 import {
   buildDefaultAllowedHosts,
   isAllInterfacesHost,
@@ -10,8 +10,9 @@ import {
 export function startSSEServer(server: Server) {
   const app = express();
 
-  // Create auth middleware - when MCP_AUTH_TOKEN is set, requires X-MCP-AUTH header
-  const authMiddleware = createAuthMiddleware();
+  // Static X-MCP-AUTH, or Authentik OAuth when AUTHENTIK_ISSUER is set.
+  const auth = configureHttpAuth(app, "/sse");
+  const authMiddleware = auth.middleware;
 
   // DNS rebinding protection is enabled by default. Set DNS_REBINDING_PROTECTION=false to disable.
   const enableDnsRebindingProtection =
@@ -54,7 +55,7 @@ export function startSSEServer(server: Server) {
   }
 
   // Currently just copying from docs & allowing for multiple transport connections: https://modelcontextprotocol.io/docs/concepts/transports#server-sent-events-sse
-  // Note: When MCP_AUTH_TOKEN is set, requests require X-MCP-AUTH header for authentication
+  // Note: MCP_AUTH_TOKEN requires X-MCP-AUTH. AUTHENTIK_ISSUER requires a Bearer token.
   let transports: Array<SSEServerTransport> = [];
 
   app.get("/sse", authMiddleware, async (req, res) => {
@@ -111,7 +112,12 @@ export function startSSEServer(server: Server) {
     console.log(
       `mcp-kubernetes-server is listening on port ${port}\nUse the following url to connect to the server:\nhttp://${advertisedHost}:${port}/sse`
     );
-    if (isAuthEnabled()) {
+    if (auth.mode === "authentik") {
+      console.log(
+        `Authentik OAuth enabled: Bearer tokens from ${auth.issuer} are required for MCP requests` +
+          (auth.acceptsStaticToken ? ". X-MCP-AUTH is also accepted." : "")
+      );
+    } else if (auth.mode === "static") {
       console.log(
         "Authentication enabled: X-MCP-AUTH header required for all MCP requests"
       );

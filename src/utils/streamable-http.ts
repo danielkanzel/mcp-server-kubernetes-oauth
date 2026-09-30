@@ -2,7 +2,7 @@ import express from "express";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import http from "http";
-import { createAuthMiddleware, isAuthEnabled } from "./auth.js";
+import { configureHttpAuth } from "./authentik-oauth.js";
 import {
   buildDefaultAllowedHosts,
   isAllInterfacesHost,
@@ -12,8 +12,9 @@ export function startStreamableHTTPServer(server: Server): http.Server {
   const app = express();
   app.use(express.json());
 
-  // Create auth middleware - when MCP_AUTH_TOKEN is set, requires X-MCP-AUTH header
-  const authMiddleware = createAuthMiddleware();
+  // Static X-MCP-AUTH, or Authentik OAuth when AUTHENTIK_ISSUER is set.
+  const auth = configureHttpAuth(app, "/mcp");
+  const authMiddleware = auth.middleware;
 
   // DNS rebinding protection is enabled by default. Set DNS_REBINDING_PROTECTION=false to disable.
   const enableDnsRebindingProtection =
@@ -152,7 +153,12 @@ export function startStreamableHTTPServer(server: Server): http.Server {
     console.log(
       `mcp-kubernetes-server is listening on port ${port}\nUse the following url to connect to the server:\nhttp://${advertisedHost}:${port}/mcp`
     );
-    if (isAuthEnabled()) {
+    if (auth.mode === "authentik") {
+      console.log(
+        `Authentik OAuth enabled: Bearer tokens from ${auth.issuer} are required for MCP requests` +
+          (auth.acceptsStaticToken ? ". X-MCP-AUTH is also accepted." : "")
+      );
+    } else if (auth.mode === "static") {
       console.log(
         "Authentication enabled: X-MCP-AUTH header required for all MCP requests"
       );

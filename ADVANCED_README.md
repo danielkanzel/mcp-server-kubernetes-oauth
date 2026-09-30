@@ -481,11 +481,74 @@ curl -X POST -H "X-MCP-AUTH: my-secret-token" -H "Content-Type: application/json
 
 #### Security Considerations
 
-This authentication method is intended as a simple way to add a layer of protection for in-cluster deployments where full OAuth would be overkill. For production internet-facing deployments, consider:
+This authentication method is intended as a simple way to add a layer of protection for in-cluster deployments where full OAuth would be overkill. For production internet-facing deployments, use Authentik OAuth below, or terminate TLS at a proxy and restrict the endpoint with NetworkPolicies.
 
-- Using a proper reverse proxy with OAuth/OIDC
-- Deploying behind a service mesh with mTLS
-- Using Kubernetes NetworkPolicies to restrict access
+### HTTP Transport Authentication (Authentik OAuth)
+
+When `AUTHENTIK_ISSUER` is set, the streamable HTTP and SSE transports require an Authentik access token (`Authorization: Bearer`). `/health` and `/ready` stay open for probes. If `MCP_AUTH_TOKEN` is also set, a matching `X-MCP-AUTH` header is still accepted, so scripts can call the server without a browser login.
+
+The process is the OAuth resource server. Authentik issues the tokens. Open-source Authentik does not implement dynamic client registration, so this server publishes the metadata MCP clients look up and a `/register` endpoint that always returns the one public client you created in Authentik. The browser login and the token request go to Authentik.
+
+Authentik puts the OAuth client id in the token `aud` claim. It does not implement RFC 8707 resource indicators, so the audience check is the client id, not the MCP URL.
+
+#### Authentik application
+
+1. Create an OAuth2/OIDC provider:
+   - Client type: **Public** (MCP clients use PKCE and cannot hold a secret)
+   - Signing key: a certificate with a private key, so access tokens are JWTs
+   - Grant types: authorization code and refresh token
+   - Scopes: `openid`, `profile`, `email` (add the `groups` scope mapping if you set `AUTHENTIK_REQUIRED_GROUPS`)
+   - Redirect URIs: regex that covers your MCP clients, for local clients `http://localhost:.*`, `http://127.0.0.1:.*`, and any custom scheme they use (for example `cursor://.*`)
+2. Create an application with that provider. The application slug is part of the issuer: `https://<authentik>/application/o/<slug>/` (the trailing slash is required; it is what Authentik writes into `iss`).
+3. Bind the application to the users or groups who may use the cluster.
+
+#### Server configuration
+
+```shell
+AUTHENTIK_ISSUER=https://authentik.example.com/application/o/mcp-k8s/ \
+AUTHENTIK_CLIENT_ID=<client id from the provider> \
+MCP_PUBLIC_URL=https://mcp.example.com \
+ENABLE_UNSAFE_STREAMABLE_HTTP_TRANSPORT=1 \
+npx mcp-server-kubernetes
+```
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `AUTHENTIK_ISSUER` | yes | Issuer URL, with the trailing slash. Must match the token `iss` claim. |
+| `AUTHENTIK_CLIENT_ID` | yes | Public client id. Also the expected `aud` unless `AUTHENTIK_AUDIENCE` is set. |
+| `MCP_PUBLIC_URL` | yes off localhost | External origin of this server, with no path, for example `https://mcp.example.com`. Required when `HOST` is `0.0.0.0`. |
+| `AUTHENTIK_JWKS_URI` | no | Signing-key URL. Defaults to `<issuer>jwks/`. Set this when the pod must fetch keys from an in-cluster address while tokens still carry the external issuer. |
+| `AUTHENTIK_SCOPES` | no | Scopes advertised to clients. Defaults to `openid profile email`. |
+| `AUTHENTIK_REQUIRED_SCOPES` | no | Space-separated scopes the access token must contain. |
+| `AUTHENTIK_REQUIRED_GROUPS` | no | Authentik `groups` claim values the caller must have. |
+| `AUTHENTIK_CLIENT_SECRET` | no | Only for opaque access tokens, which are checked via introspection. Prefer a signing key and JWT access tokens instead. |
+| `AUTHENTIK_AUTHORIZATION_ENDPOINT` | no | Defaults to `<issuer>authorize/`. |
+| `AUTHENTIK_TOKEN_ENDPOINT` | no | Defaults to `<issuer>token/`. |
+
+`http://` is accepted for `MCP_PUBLIC_URL` only when the host is localhost. Anywhere else the public URL must be `https://`.
+
+Helm chart: the deployment already binds `0.0.0.0` and reads extra variables from `env`. `MCP_PUBLIC_URL` must be the URL clients use, not the pod IP.
+
+```yaml
+env:
+  AUTHENTIK_ISSUER: "https://authentik.example.com/application/o/mcp-k8s/"
+  AUTHENTIK_CLIENT_ID: "<client id>"
+  MCP_PUBLIC_URL: "https://mcp.example.com"
+```
+
+#### Client configuration
+
+Point the MCP client at the server URL. The client discovers `/.well-known/oauth-protected-resource`, registers, and opens the Authentik login. No static header is required.
+
+```json
+{
+  "mcpServers": {
+    "kubernetes": {
+      "url": "https://mcp.example.com/mcp"
+    }
+  }
+}
+```
 
 ## Advance Docker Usage
 
